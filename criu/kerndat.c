@@ -81,6 +81,22 @@ static int check_pagemap(void)
 	return 0;
 }
 
+struct self_maps_args {
+	unsigned long vm_start;
+	dev_t *device;
+};
+
+static int self_maps_parser(struct vm_area *vma, void *arg)
+{
+	struct self_maps_args *args = arg;
+	if (args->vm_start > vma->addr) 
+		return MAPS_PARSE_CONTINUE;
+	if (args->vm_start < vma->addr)
+		return MAPS_PARSE_ERROR;
+	*(args->device) = makedev(vma->maj, vma->min);
+	return MAPS_PARSE_STOP;
+}
+
 /*
  * Anonymous shared mappings are backed by hidden tmpfs
  * mount. Find out its dev to distinguish such mappings
@@ -89,39 +105,14 @@ static int check_pagemap(void)
 
 static int parse_self_maps(unsigned long vm_start, dev_t *device)
 {
-	FILE *maps;
-	char buf[1024];
+	struct self_maps_args args = {
+		.vm_start = vm_start,
+		.device = device
+	};
 
-	maps = fopen_proc(PROC_SELF, "maps");
-	if (maps == NULL)
-		return -1;
+	pr_msg("Enter parse_self_maps\n");
 
-	while (fgets(buf, sizeof(buf), maps) != NULL) {
-		char *end, *aux;
-		unsigned long start;
-		int maj, min;
-
-		start = strtoul(buf, &end, 16);
-		if (vm_start > start)
-			continue;
-		if (vm_start < start)
-			break;
-
-		/* It's ours */
-		aux = strchr(end + 1, ' '); /* end prot */
-		aux = strchr(aux + 1, ' '); /* prot pgoff */
-		aux = strchr(aux + 1, ' '); /* pgoff dev */
-
-		maj = strtoul(aux + 1, &end, 16);
-		min = strtoul(end + 1, NULL, 16);
-
-		*device = makedev(maj, min);
-		fclose(maps);
-		return 0;
-	}
-
-	fclose(maps);
-	return -1;
+	return parse_proc_maps(PROC_SELF, self_maps_parser, &args);
 }
 
 static void kerndat_mmap_min_addr(void)
@@ -626,14 +617,51 @@ static int kerndat_compat_restore(void)
 	return 0;
 }
 
+struct kerndat_detect_stack_guard_gap_args {
+	void *mem;
+	int detected;
+};
+
+static int kerndat_detect_stack_guard_gap_parser(struct vm_area *vma, void *arg)
+{
+	struct kerndat_detect_stack_guard_gap_args *args = arg;
+
+	/*
+		* When reading /proc/$pid/[s]maps the
+		* start/end addresses might be cutted off
+		* with PAGE_SIZE on kernels prior 4.12
+		* (see kernel commit 1be7107fbe18ee).
+		*
+		* Same time there was semi-complete
+		* patch released which hitted a number
+		* of repos (Ubuntu, Fedora) where instead
+		* of PAGE_SIZE the 1M gap is cutted off.
+		*/
+	if (vma->addr == (unsigned long)(args->mem)) {
+		kdat.stack_guard_gap_hidden = false;
+		args->detected = 1;
+		return MAPS_PARSE_STOP;
+
+	} 
+	if (vma->addr == ((unsigned long)(args->mem) + (1ul << 20))) {
+		pr_warn("Unsupported stack guard detected, confused but continue\n");
+		kdat.stack_guard_gap_hidden = true;
+		args->detected = 1;
+		return MAPS_PARSE_STOP;
+	} 
+	if (vma->addr == ((unsigned long)(args->mem) + PAGE_SIZE)) {
+		kdat.stack_guard_gap_hidden = true;
+		args->detected = 1;
+		return MAPS_PARSE_STOP;
+	}
+	return MAPS_PARSE_CONTINUE;
+}
 static int kerndat_detect_stack_guard_gap(void)
 {
-	int num, ret = -1, detected = 0;
-	unsigned long start, end;
-	char r, w, x, s;
-	char buf[1024];
-	FILE *maps;
+	int ret = -1, detected = 0;
 	void *mem;
+
+	pr_msg("Enter kerndat_detect_stack_guard_gap\n"); 
 
 	mem = mmap(NULL, (3ul << 20), PROT_READ | PROT_WRITE,
 		   MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0);
@@ -650,53 +678,20 @@ static int kerndat_detect_stack_guard_gap(void)
 		return -1;
 	}
 
-	maps = fopen("/proc/self/maps", "r");
-	if (maps == NULL) {
-		munmap(mem, 4096);
-		return -1;
-	}
+	struct kerndat_detect_stack_guard_gap_args args = {
+		.mem = mem,
+		.detected = detected
+	};
 
-	while (fgets(buf, sizeof(buf), maps)) {
-		num = sscanf(buf, "%lx-%lx %c%c%c%c",
-			     &start, &end, &r, &w, &x, &s);
-		if (num < 6) {
-			pr_err("Can't parse: %s\n", buf);
-			goto err;
-		}
-
-		/*
-		 * When reading /proc/$pid/[s]maps the
-		 * start/end addresses might be cutted off
-		 * with PAGE_SIZE on kernels prior 4.12
-		 * (see kernel commit 1be7107fbe18ee).
-		 *
-		 * Same time there was semi-complete
-		 * patch released which hitted a number
-		 * of repos (Ubuntu, Fedora) where instead
-		 * of PAGE_SIZE the 1M gap is cutted off.
-		 */
-		if (start == (unsigned long)mem) {
-			kdat.stack_guard_gap_hidden = false;
-			detected = 1;
-			break;
-		} else if (start == ((unsigned long)mem + (1ul << 20))) {
-			pr_warn("Unsupported stack guard detected, confused but continue\n");
-			kdat.stack_guard_gap_hidden = true;
-			detected = 1;
-			break;
-		} else if (start == ((unsigned long)mem + PAGE_SIZE)) {
-			kdat.stack_guard_gap_hidden = true;
-			detected = 1;
-			break;
-		}
-	}
+	ret = parse_proc_maps(PROC_SELF, kerndat_detect_stack_guard_gap_parser, &args);
+	if (ret < 0)
+		goto err;
 
 	if (detected)
 		ret = 0;
 
 err:
 	munmap(mem, (1ul << 20));
-	fclose(maps);
 	return ret;
 }
 

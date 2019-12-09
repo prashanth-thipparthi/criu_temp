@@ -502,6 +502,57 @@ err:
 	return -1;
 }
 
+int parse_proc_maps(pid_t pid, parse_vma parser, void *arg)
+{
+	int ret;
+	FILE *maps;
+	char buf[256];
+	
+	// TODO PROC_SELF
+	maps = fopen_proc(pid, "maps");
+	if (!maps)
+		return -1;
+
+	ret = 0;
+	while (fgets(buf, sizeof(buf), maps)) {
+		struct vm_area v;
+		unsigned long end;
+		int r, tail;
+		
+		// TODO parse it correctly
+		r = sscanf(buf, "%lx-%lx %c%c%c%c %*s %u:%u %*s %n\n", 
+				&v.addr, &end, &v.r, &v.w, &v.x, &v.s, &v.maj, &v.min, &tail);
+		// TODO Figure out error checking
+		// kerndat_detect_stack_guard_gap requires a check <6
+		if (r <= 0) {
+			fclose(maps);
+			pr_err("Bad maps format %d.%d (%s)\n", r, tail, buf + tail);
+			return -1;
+		}
+		if (r == EOF) {
+			ret = -1; // TODO figure out what should be returned here
+			break;
+		}
+
+		v.size = end - v.addr;
+		v.name = buf + tail;
+		
+		ret = parser(&v, arg);
+		if (ret == MAPS_PARSE_CONTINUE)
+			continue;
+		if (ret == MAPS_PARSE_STOP)
+			break;
+		if (ret == MAPS_PARSE_ERROR) {
+			ret = -1;
+			goto out;
+		}
+	}
+	ret = 0;
+out:
+	fclose(maps);
+	return ret;
+}
+
 static inline int handle_vdso_vma(struct vma_area *vma)
 {
 	vma->e->status |= VMA_AREA_REGULAR;

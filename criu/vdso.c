@@ -302,69 +302,52 @@ int parasite_fixup_vdso(struct parasite_ctl *ctl, pid_t pid,
 	return 0;
 }
 
+static int vdso_maps_parser(struct vm_area *vma, void *arg)
+{
+	char *has_vdso, *has_vvar;
+	struct vdso_maps *s = arg;
+
+	has_vdso = strstr(vma->name, "[vdso]");
+	if (!has_vdso)
+		has_vvar = strstr(vma->name, "[vvar]");
+	else
+		has_vvar = NULL;
+
+	if (!has_vdso && !has_vvar)
+		return MAPS_PARSE_CONTINUE;
+
+	if (has_vdso) {
+		if (s->vdso_start != VDSO_BAD_ADDR) {
+			pr_err("Got second vDSO entry\n");
+			return MAPS_PARSE_ERROR;
+		}
+		s->vdso_start = vma->addr;
+		s->sym.vdso_size = vma->size;
+	} else {
+		if (s->vvar_start != VVAR_BAD_ADDR) {
+			pr_err("Got second VVAR entry\n");
+			return MAPS_PARSE_ERROR;
+		}
+		s->vvar_start = vma->addr;
+		s->sym.vvar_size = vma->size;
+	}
+	return MAPS_PARSE_CONTINUE;
+}
+
 static int vdso_parse_maps(pid_t pid, struct vdso_maps *s)
 {
-	int exit_code = -1;
-	char *buf;
-	struct bfd f;
+	int ret;
+
+	pr_msg("Enter vdso_parse_maps\n");
 
 	*s = (struct vdso_maps)VDSO_MAPS_INIT;
 
-	f.fd = open_proc(pid, "maps");
-	if (f.fd < 0)
-		return -1;
-
-	if (bfdopenr(&f))
-		goto err;
-
-	while (1) {
-		unsigned long start, end;
-		char *has_vdso, *has_vvar;
-
-		buf = breadline(&f);
-		if (buf == NULL)
-			break;
-		if (IS_ERR(buf))
-			goto err;
-
-		has_vdso = strstr(buf, "[vdso]");
-		if (!has_vdso)
-			has_vvar = strstr(buf, "[vvar]");
-		else
-			has_vvar = NULL;
-
-		if (!has_vdso && !has_vvar)
-			continue;
-
-		if (sscanf(buf, "%lx-%lx", &start, &end) != 2) {
-			pr_err("Can't find vDSO/VVAR bounds\n");
-			goto err;
-		}
-
-		if (has_vdso) {
-			if (s->vdso_start != VDSO_BAD_ADDR) {
-				pr_err("Got second vDSO entry\n");
-				goto err;
-			}
-			s->vdso_start = start;
-			s->sym.vdso_size = end - start;
-		} else {
-			if (s->vvar_start != VVAR_BAD_ADDR) {
-				pr_err("Got second VVAR entry\n");
-				goto err;
-			}
-			s->vvar_start = start;
-			s->sym.vvar_size = end - start;
-		}
-	}
+	ret = parse_proc_maps(pid, vdso_maps_parser, s);
 
 	if (s->vdso_start != VDSO_BAD_ADDR && s->vvar_start != VVAR_BAD_ADDR)
 		s->sym.vdso_before_vvar = (s->vdso_start < s->vvar_start);
 
-	exit_code = 0;
-err:
-	bclose(&f);
-	return exit_code;
+	return ret;
 }
 
 static int validate_vdso_addr(struct vdso_maps *s)

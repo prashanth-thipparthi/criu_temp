@@ -617,45 +617,38 @@ struct special_mapping {
 	size_t		size;
 };
 
-static int parse_special_maps(struct special_mapping *vmas, size_t nr)
-{
-	FILE *maps;
-	char buf[256];
-	int ret = 0;
+struct special_parser_args {
+	struct special_mapping *vmas;
+	size_t nr;
+};
 
-	maps = fopen_proc(PROC_SELF, "maps");
-	if (!maps)
-		return -1;
+int special_maps_parser(struct vm_area *vma, void *arg) {
+	size_t i;
+	struct special_parser_args *args = arg;
 
-	while (fgets(buf, sizeof(buf), maps)) {
-		unsigned long start, end;
-		int r, tail;
-		size_t i;
-
-		r = sscanf(buf, "%lx-%lx %*s %*s %*s %*s %n\n",
-				&start, &end, &tail);
-		if (r != 2) {
-			fclose(maps);
-			pr_err("Bad maps format %d.%d (%s)\n", r, tail, buf + tail);
+	for (i = 0; i < args->nr; i++) {
+		if (strcmp(vma->name, args->vmas[i].name) != 0)
+			continue;
+		if (args->vmas[i].addr != MAP_FAILED) {
+			pr_err("Special mapping meet twice: %s\n", args->vmas[i].name);
 			return -1;
 		}
-
-		for (i = 0; i < nr; i++) {
-			if (strcmp(buf + tail, vmas[i].name) != 0)
-				continue;
-			if (vmas[i].addr != MAP_FAILED) {
-				pr_err("Special mapping meet twice: %s\n", vmas[i].name);
-				ret = -1;
-				goto out;
-			}
-			vmas[i].addr = (void *)start;
-			vmas[i].size = end - start;
-		}
+		args->vmas[i].addr = (void *)vma->addr;
+		args->vmas[i].size = vma->size;
 	}
+	return MAPS_PARSE_CONTINUE;
+}
 
-out:
-	fclose(maps);
-	return ret;
+static int parse_special_maps(struct special_mapping *vmas, size_t nr)
+{
+	struct special_parser_args args = {
+		.vmas = vmas,
+		.nr = nr
+	};
+
+	pr_msg("Enter parse_special_maps\n");
+
+	return parse_proc_maps(PROC_SELF, special_maps_parser, &args);
 }
 
 static void dummy_sighandler(int sig)
@@ -865,39 +858,33 @@ static int check_posix_timers(void)
 	return -1;
 }
 
+static int get_ring_len_parser(struct vm_area *vma, void *arg)
+{
+	struct vm_area *out = arg;
+	
+	if (vma->addr != out->addr)
+		return MAPS_PARSE_CONTINUE;
+	if (strcmp(vma->name, "/[aio] (deleted)\n") == 0) {
+		*out = *vma;
+		return MAPS_PARSE_STOP;
+	}
+	pr_err("No AIO ring at expected location\n");
+	return -1;
+}
+
 static unsigned long get_ring_len(unsigned long addr)
 {
-	FILE *maps;
-	char buf[256];
+	int ret;
+	struct vm_area vma;
+	vma.addr = addr;
 
-	maps = fopen_proc(PROC_SELF, "maps");
-	if (!maps)
+	pr_msg("Enter get_ring_len\n");
+
+	ret = parse_proc_maps(PROC_SELF, get_ring_len_parser, &vma);
+	if (ret < 0) {
 		return 0;
-
-	while (fgets(buf, sizeof(buf), maps)) {
-		unsigned long start, end;
-		int r, tail;
-
-		r = sscanf(buf, "%lx-%lx %*s %*s %*s %*s %n\n", &start, &end, &tail);
-		if (r != 2) {
-			fclose(maps);
-			pr_err("Bad maps format %d.%d (%s)\n", r, tail, buf + tail);
-			return 0;
-		}
-
-		if (start == addr) {
-			fclose(maps);
-			if (strcmp(buf + tail, "/[aio] (deleted)\n"))
-				goto notfound;
-
-			return end - start;
-		}
 	}
-
-	fclose(maps);
-notfound:
-	pr_err("No AIO ring at expected location\n");
-	return 0;
+	return vma.size;
 }
 
 static int check_aio_remap(void)

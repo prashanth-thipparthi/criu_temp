@@ -83,6 +83,26 @@ struct proc_status_creds {
 	u32			cap_bnd[PROC_CAP_SIZE];
 };
 
+// TODO Finish me
+struct vm_area {
+	unsigned long addr; /* start address of the vma */
+	size_t size; /* length of vma */
+	int flags;  		/*  */
+	char file[256];     /* if this was mapped from a file, includes */
+	char *name;
+	int maj;
+	int min;
+	char r, w, x, s;	/* permssions */
+};
+
+enum {
+	MAPS_PARSE_CONTINUE,
+	MAPS_PARSE_STOP,
+	MAPS_PARSE_ERROR,
+};
+
+typedef int (*parse_vma)(struct vm_area *vma, void *arg);
+
 #define INVALID_UID ((uid_t)-1)
 
 extern int parse_pid_stat(pid_t pid, struct proc_pid_stat *s);
@@ -92,6 +112,7 @@ extern int prepare_loginuid(unsigned int value, unsigned int loglevel);
 extern int parse_pid_status(pid_t pid, struct seize_task_status *, void *data);
 extern int parse_file_locks(void);
 extern int get_fd_mntid(int fd, int *mnt_id);
+extern int parse_proc_maps(pid_t pid, parse_vma parser, void *arg);
 
 struct pid;
 extern int parse_threads(int pid, struct pid **_t, int *_n);
